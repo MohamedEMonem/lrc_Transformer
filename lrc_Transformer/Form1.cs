@@ -1,127 +1,109 @@
 using lrc_Transformer;
 using System;
-using System.Collections.Generic;
+using System.Drawing;
 using System.IO;
-using System.Linq;
 using System.Text;
+using System.Threading.Tasks;
 using System.Windows.Forms;
-using static System.Windows.Forms.VisualStyles.VisualStyleElement;
 
 namespace lrc_Transformer
 {
     public partial class Form1 : Form
     {
-        private GeminiService? _geminiService;
-
+        private PythonRomajiService _romajiService;
+        
         public Form1()
         {
             InitializeComponent();
-
-            // Get Key
-            string apiKey = Environment.GetEnvironmentVariable("GEMINI_API_KEY");
-
-            // If you don't have the Environment Variable set yet, 
-            // uncomment the line below and paste your key to test:
-            //string apiKey = "Your_API_here";
-
-            if (!string.IsNullOrEmpty(apiKey))
-            {
-                _geminiService = new GeminiService(apiKey);
-            }
+            _romajiService = new PythonRomajiService();
         }
 
         private void Form1_Load(object sender, EventArgs e)
         {
-            // Load saved prompt or default
+            // 1. Load Settings
             txtSystemPrompt.Text = Properties.Settings.Default.SavedPrompt;
-            if (string.IsNullOrEmpty(txtSystemPrompt.Text))
-            {
+            if (string.IsNullOrEmpty(txtSystemPrompt.Text)) 
                 txtSystemPrompt.Text = "Transliterate Japanese to Romaji. Keep timestamps.";
-            }
-            UpdateUI();
+
+            // 2. Setup Defaults
+            radioOffline.Checked = true;        // Default to Offline
+            
+            // Try to load API key from Env Var first, then UI
+            string envKey = Environment.GetEnvironmentVariable("GEMINI_API_KEY");
+            if (!string.IsNullOrEmpty(envKey)) txtApiKey.Text = envKey;
+
+            UpdateUIState();
         }
 
-        private void Form1_FormClosing(object sender, FormClosingEventArgs e)
-        {
-            Properties.Settings.Default.SavedPrompt = txtSystemPrompt.Text;
-            Properties.Settings.Default.Save();
-        }
+        // Run this whenever the user switches Radio Buttons
+        private void radioOffline_CheckedChanged(object sender, EventArgs e) => UpdateUIState();
+        private void radioGemini_CheckedChanged(object sender, EventArgs e) => UpdateUIState();
 
-        private void chkReplaceOriginal_CheckedChanged(object sender, EventArgs e) => UpdateUI();
-
-        private void UpdateUI()
+        private void UpdateUIState()
         {
-            bool isReplace = chkReplaceOriginal.Checked;
-            txtOutputPath.Enabled = !isReplace;
-            btnBrowseOutput.Enabled = !isReplace;
-            if (isReplace && !string.IsNullOrEmpty(txtInputPath.Text)) txtOutputPath.Text = txtInputPath.Text;
-        }
+            bool isGemini = radioGemini.Checked;
 
-        private void btnBrowseInput_Click(object sender, EventArgs e)
-        {
-            using (var ofd = new OpenFileDialog { Filter = "LRC|*.lrc|All|*.*" })
-            {
-                if (ofd.ShowDialog() == DialogResult.OK)
-                {
-                    txtInputPath.Text = ofd.FileName;
-                    if (chkReplaceOriginal.Checked) txtOutputPath.Text = ofd.FileName;
-                }
-            }
-        }
-
-        private void btnBrowseOutput_Click(object sender, EventArgs e)
-        {
-            using (var sfd = new SaveFileDialog { Filter = "LRC|*.lrc" })
-            {
-                if (sfd.ShowDialog() == DialogResult.OK) txtOutputPath.Text = sfd.FileName;
-            }
+            // Toggle visibility based on selection
+            txtApiKey.Enabled = isGemini;
+            txtSystemPrompt.Enabled = isGemini;
         }
 
         private async void btnProcess_Click(object sender, EventArgs e)
         {
-            // 1. API Check
-            if (_geminiService == null)
+            if (string.IsNullOrEmpty(txtInputPath.Text) || !File.Exists(txtInputPath.Text))
             {
-                MessageBox.Show("API Key is missing! Set GEMINI_API_KEY environment variable.");
+                MessageBox.Show("Please select a valid input file.");
                 return;
             }
 
-            if (string.IsNullOrEmpty(txtInputPath.Text) || !File.Exists(txtInputPath.Text)) return;
+            // Determine Output Path
+            string savePath = chkReplaceOriginal.Checked ? txtInputPath.Text : txtOutputPath.Text;
+            if (!chkReplaceOriginal.Checked && string.IsNullOrEmpty(savePath))
+            {
+                 string dir = Path.GetDirectoryName(txtInputPath.Text);
+                 string name = Path.GetFileNameWithoutExtension(txtInputPath.Text);
+                 savePath = Path.Combine(dir, $"{name}_romaji.lrc");
+            }
+
+            // Backup if replacing
+            if (chkReplaceOriginal.Checked) File.Copy(savePath, savePath + ".bak", true);
+
+            btnProcess.Enabled = false;
+            progressBar1.Visible = true;
 
             try
             {
-                // 2. UI Updates
-                btnProcess.Enabled = false;
-                progressBar1.Visible = true;
-
-                // 3. Read the File
-                string content = await File.ReadAllTextAsync(txtInputPath.Text);
-
-
-                string userInstruction = txtSystemPrompt.Text;
-
-                // If the user left the box empty, use the default Transliteration prompt
-                if (string.IsNullOrWhiteSpace(userInstruction))
+                if (radioOffline.Checked)
                 {
-                    userInstruction = "Transliterate these Japanese lyrics to Romaji. Keep timestamps exact.";
+                    // --- OPTION A: OFFLINE PYTHON ---
+                    await _romajiService.ConvertFileAsync(txtInputPath.Text, savePath, "auto");
+                }
+                else
+                {
+                    // --- OPTION B: GEMINI API ---
+                    string key = txtApiKey.Text.Trim();
+                    if (string.IsNullOrEmpty(key)) 
+                    {
+                        MessageBox.Show("Please enter a Gemini API Key.");
+                        return;
+                    }
+
+                    // Initialize Service on the fly with the provided key
+                    var gemini = new GeminiService(key);
+                    string content = await File.ReadAllTextAsync(txtInputPath.Text);
+                    string prompt = txtSystemPrompt.Text;
+                    
+                    string result = await gemini.TransformLrcAsync(prompt, content);
+                    result = CleanMarkdown(result);
+                    
+                    await File.WriteAllTextAsync(savePath, result, Encoding.UTF8);
                 }
 
-                // 4. Call Gemini with the confirmed instruction
-                string result = await _geminiService.TransformLrcAsync(userInstruction, content);
-
-                // 5. Cleanup & Save
-                result = CleanMarkdown(result);
-
-                string savePath = chkReplaceOriginal.Checked ? txtInputPath.Text : txtOutputPath.Text;
-
-                if (chkReplaceOriginal.Checked) File.Copy(savePath, savePath + ".bak", true);
-
-                await File.WriteAllTextAsync(savePath, result, Encoding.UTF8);
-                MessageBox.Show("Done!");
+                MessageBox.Show($"Success! File saved to:\n{savePath}");
             }
             catch (Exception ex)
             {
-                MessageBox.Show("Error: " + ex.Message);
+                MessageBox.Show($"Error: {ex.Message}");
             }
             finally
             {
@@ -129,12 +111,37 @@ namespace lrc_Transformer
                 progressBar1.Visible = false;
             }
         }
+
+        // Helper to clean Gemini markdown output
         private string CleanMarkdown(string text)
         {
             var lines = text.Split('\n').ToList();
             if (lines.Count > 0 && lines[0].Contains("```")) lines.RemoveAt(0);
             if (lines.Count > 0 && lines[lines.Count - 1].Contains("```")) lines.RemoveAt(lines.Count - 1);
             return string.Join("\n", lines).Trim();
+        }
+
+        // ... Keep your existing Browse/Save handlers ...
+        private void btnBrowseInput_Click(object sender, EventArgs e)
+        {
+            using (var ofd = new OpenFileDialog { Filter = "LRC|*.lrc|All|*.*" }) {
+                if (ofd.ShowDialog() == DialogResult.OK) txtInputPath.Text = ofd.FileName;
+            }
+        }
+        private void btnBrowseOutput_Click(object sender, EventArgs e) {
+            using (var sfd = new SaveFileDialog { Filter = "LRC|*.lrc" }) {
+                if (sfd.ShowDialog() == DialogResult.OK) txtOutputPath.Text = sfd.FileName;
+            }
+        }
+        private void chkReplaceOriginal_CheckedChanged(object sender, EventArgs e) {
+            bool isReplace = chkReplaceOriginal.Checked;
+            txtOutputPath.Enabled = !isReplace;
+            btnBrowseOutput.Enabled = !isReplace;
+            if (isReplace) txtOutputPath.Text = txtInputPath.Text;
+        }
+        private void Form1_FormClosing(object sender, FormClosingEventArgs e) {
+            Properties.Settings.Default.SavedPrompt = txtSystemPrompt.Text;
+            Properties.Settings.Default.Save();
         }
     }
 }
