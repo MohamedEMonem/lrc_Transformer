@@ -7,38 +7,44 @@ namespace lrc_Transformer
 {
     public class PythonRomajiService
     {
-        // Change from 'const' to properties or readonly fields so we can calculate paths dynamically
         private static string ProjectRoot
         {
             get
             {
-                // Get the directory where the .exe is running (e.g., bin/Debug/net6.0)
                 string baseDir = AppDomain.CurrentDomain.BaseDirectory;
 
-                // Move up 3 levels to get out of bin/Debug/netX.0 to the actual Project Root
-                // Adjust the number of "..\" if your folder structure is different
-                return Path.GetFullPath(Path.Combine(baseDir, @"..\..\..\"));
+                // 1. Release Mode: Look for the engine right next to the app
+                if (File.Exists(Path.Combine(baseDir, "romaji_engine.exe")))
+                {
+                    return baseDir; 
+                }
+
+                // 2. Dev Mode: Look inside the dist folder where PyInstaller put it
+                string devPath = Path.GetFullPath(Path.Combine(baseDir, @"..\..\..\romaji_Convertor\dist"));
+                if (File.Exists(Path.Combine(devPath, "romaji_engine.exe")))
+                {
+                    return devPath;
+                }
+
+                return baseDir;
             }
         }
 
-        private static string PythonExePath => Path.Combine(ProjectRoot, @"romaji_Convertor\.venv\Scripts\python.exe");
-        private static string ScriptPath => Path.Combine(ProjectRoot, @"romaji_Convertor\main.py");
+        // Point directly to the compiled engine
+        private static string EnginePath => Path.Combine(ProjectRoot, "romaji_engine.exe");
 
-        public async Task ConvertFileAsync(string inputPath, string outputPath, string mode)
+        public async Task ConvertFileAsync(string inputPath, string outputPath)
         {
-            // Verify files exist before running to avoid confusing Python errors
-            if (!File.Exists(PythonExePath))
-                throw new FileNotFoundException($"Python executable not found at: {PythonExePath}");
-            
-            if (!File.Exists(ScriptPath))
-                throw new FileNotFoundException($"Python script not found at: {ScriptPath}");
+            if (!File.Exists(EnginePath))
+                throw new FileNotFoundException($"Romaji Engine not found at: {EnginePath}");
 
-            // We now pass 3 arguments: Script, Input, Output, Mode
-            string arguments = $"\"{ScriptPath}\" \"{inputPath}\" \"{outputPath}\" \"{mode}\"";
+            // OLD: "python.exe" "script.py" "arg1" "arg2"
+            // NEW: "romaji_engine.exe" "arg1" "arg2"
+            string arguments = $"\"{inputPath}\" \"{outputPath}\"";
 
             var startInfo = new ProcessStartInfo
             {
-                FileName = PythonExePath,
+                FileName = EnginePath,
                 Arguments = arguments,
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
@@ -48,13 +54,16 @@ namespace lrc_Transformer
 
             using (var process = Process.Start(startInfo))
             {
+                if (process == null)
+                    throw new Exception("Failed to start Romaji Engine process");
+
                 string output = await process.StandardOutput.ReadToEndAsync();
                 string error = await process.StandardError.ReadToEndAsync();
                 await process.WaitForExitAsync();
 
                 if (!output.Contains("DONE_SUCCESS"))
                 {
-                    throw new Exception($"Python Failed. Error: {error} \nOutput: {output}");
+                    throw new Exception($"Engine Failed. Error: {error} \nOutput: {output}");
                 }
             }
         }

@@ -75,8 +75,8 @@ namespace lrc_Transformer
             {
                 if (radioOffline.Checked)
                 {
-                    // --- OPTION A: OFFLINE PYTHON ---
-                    await _romajiService.ConvertFileAsync(txtInputPath.Text, savePath, "auto");
+                    // --- OPTION A: OFFLINE ROMAJI ENGINE ---
+                    await _romajiService.ConvertFileAsync(txtInputPath.Text, savePath);
                 }
                 else
                 {
